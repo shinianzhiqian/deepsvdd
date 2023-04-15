@@ -9,6 +9,7 @@ import numpy as np
 from .utils.evaluate import evaluate_by_entity
 from .utils.log import record_res
 
+
 class Encoder(nn.Module):
     def __init__(self, num_metric=4096, hidden_dim=1024, num_layers=2):
         super(Encoder, self).__init__()
@@ -185,14 +186,25 @@ class LSTMAE(nn.Module):
 
         enc_hidden = self.lstm_enc(x)
 
-        temp_input = torch.zeros((batch_size, seq_len, feature_dim), dtype=torch.float)
+        temp_input = torch.zeros(
+            (batch_size, seq_len, feature_dim), dtype=torch.float)
         hidden = enc_hidden
-        reconstruct_output, hidden = self.lstm_dec(temp_input, hidden)
-        reconstruct_loss = self.criterion(reconstruct_output, x)
+        reconstruct_output, hidden = self.lstm_dec(
+            temp_input, hidden)  # batch_size x seq_len x num_metric
 
+        # 计算编码向量enc_hidden[0]的中心 center 和半径 radius。其中，中心 center 表示编码向量的平均值，半径 radius 表示编码向量到中心的最大距离。
+        # 定义损失函数_loss。该函数包括两部分，一部分是重构误差，即输入数据 x 和模型重构的数据 x_recon 的欧式距离平方的均值；另一部分是正则化项，即半径 radius 的平方。
+        center = torch.mean(enc_hidden[0], dim=0)
+        radius = torch.max(torch.sqrt(
+            torch.sum((enc_hidden[0] - center)**2, dim=1)))
+
+        def loss(x, x_recon, center, radius):
+            dist = torch.sum((x - x_recon) ** 2, dim=1)
+            loss = torch.mean(dist) + radius ** 2
+            return loss
+        
+        reconstruct_loss = loss(x, reconstruct_output, center, radius)
         return reconstruct_loss, reconstruct_output, (0, 0)
-    
-
 
 
 def train(dataloader, params, writer, test_loaders=None):
@@ -206,9 +218,8 @@ def train(dataloader, params, writer, test_loaders=None):
 
     log_interval = 1
 
-
-    model = LSTMVAE(num_metric, hidden_dim, z_dim).to(device)  #type: LSTMVAE
-    optimizer = optim.Adam(model.parameters(), lr=lr)    
+    model = LSTMAE(num_metric, hidden_dim, z_dim).to(device)  # type: LSTMVAE
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     loss_ls = []
     global_step = 0
@@ -221,10 +232,11 @@ def train(dataloader, params, writer, test_loaders=None):
 
             if (step + 1) % log_interval == 0:
                 avg_loss = np.average(loss_ls)
-                pbar.set_description(f"Epoch: {epoch+1}, Loss: {avg_loss: .4f}")
+                pbar.set_description(
+                    f"Epoch: {epoch+1}, Loss: {avg_loss: .4f}")
                 writer.add_scalar("loss", avg_loss, global_step=global_step)
-                global_step += 1 
-                
+                global_step += 1
+
                 loss_ls.clear()
 
             optimizer.zero_grad()
@@ -232,22 +244,21 @@ def train(dataloader, params, writer, test_loaders=None):
             optimizer.step()
 
         # Evaluate
-        if (epoch + 1) % log_interval == 0:  
+        if (epoch + 1) % log_interval == 0:
             res_ls = evaluate_by_entity(model, test_loaders, test, params)
             record_res(writer, res_ls, epoch+1)
 
     return model
 
 
-
-def test(model: LSTMVAE, dataloader, params):
+def test(model: LSTMAE, dataloader, params):
     win_len = params.get("win_len")
     num_metric = params.get("num_metric")
-    device = params.get("device")    
-    
+    device = params.get("device")
+
     labels, raw_seq, est_seq, loss = [], [], [], []
     model.eval()
-    
+
     loss_ls = []
     with torch.no_grad():
         for x, y in dataloader:
@@ -260,7 +271,6 @@ def test(model: LSTMVAE, dataloader, params):
             raw_seq.append(x[:, -1].cpu().numpy())
             est_seq.append(x_recons[:, -1].cpu().numpy())
 
-    
     raw_seq = np.concatenate(raw_seq, axis=0)
     est_seq = np.concatenate(est_seq, axis=0)
     labels = np.concatenate(labels, axis=0)
